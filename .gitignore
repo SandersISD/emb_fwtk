@@ -1,0 +1,14 @@
+# J-Link software — SEGGER license restricts redistribution
+JLink_Linux_*.tgz
+JLink_Linux_*.tar.gz
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCA Joint Visualizer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a12; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+  #canvas-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+
+  #panel {
+    position: fixed; top: 16px; right: 16px;
+    background: rgba(20, 20, 35, 0.92);
+    border: 1px solid rgba(80, 80, 120, 0.4);
+    border-radius: 12px;
+    padding: 20px 24px;
+    min-width: 280px;
+    backdrop-filter: blur(10px);
+    z-index: 10;
+  }
+  #panel h1 { font-size: 15px; font-weight: 600; margin-bottom: 4px; color: #8b9adf; letter-spacing: 0.5px; }
+  #panel .subtitle { font-size: 11px; color: #606080; margin-bottom: 16px; }
+  #panel .status { font-size: 12px; padding: 4px 8px; border-radius: 4px; margin-bottom: 12px; display: inline-block; }
+  #panel .status.ok { background: rgba(40, 160, 80, 0.2); color: #4caf50; }
+  #panel .status.waiting { background: rgba(160, 160, 40, 0.2); color: #ffc107; }
+  #panel .status.error { background: rgba(160, 40, 40, 0.2); color: #f44336; }
+
+  .readout { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(40, 40, 60, 0.5); }
+  .readout:last-child { border-bottom: none; }
+  .readout .label { font-size: 13px; color: #8080a0; }
+  .readout .value { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .readout .value.red { color: #ff6b6b; }
+  .readout .value.green { color: #6bff6b; }
+  .readout .value.blue { color: #6b9eff; }
+  .readout .value.theta { color: #d4a0ff; }
+
+  #raw-panel {
+    position: fixed; bottom: 16px; right: 16px;
+    background: rgba(20, 20, 35, 0.85);
+    border: 1px solid rgba(80, 80, 120, 0.3);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 11px;
+    color: #606080;
+    z-index: 10;
+  }
+  #raw-panel table { border-collapse: collapse; }
+  #raw-panel td { padding: 2px 8px; text-align: right; font-variant-numeric: tabular-nums; }
+  #raw-panel .hdr { color: #8b9adf; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+
+<div id="panel">
+  <h1>SCA JOINT STATE</h1>
+  <div class="subtitle">RGB Sensing — Zero-Forcing Estimation</div>
+  <div id="status" class="status waiting">CONNECTING...</div>
+  <div class="readout"><span class="label">d₀ (Red)</span><span id="d0" class="value red">— mm</span></div>
+  <div class="readout"><span class="label">d₁ (Green)</span><span id="d1" class="value green">— mm</span></div>
+  <div class="readout"><span class="label">d₂ (Blue)</span><span id="d2" class="value blue">— mm</span></div>
+  <div class="readout"><span class="label">θ (geometric)</span><span id="theta" class="value theta">— °</span></div>
+  <div class="readout"><span class="label">cos θ</span><span id="costheta" class="value theta">—</span></div>
+</div>
+
+<div id="raw-panel">
+  <table>
+    <tr><td class="hdr">Sensor</td><td class="hdr">R</td><td class="hdr">G</td><td class="hdr">B</td><td class="hdr">C</td><td class="hdr">IR</td></tr>
+    <tr><td class="hdr">0</td><td id="r0r">—</td><td id="r0g">—</td><td id="r0b">—</td><td id="r0c">—</td><td id="r0i">—</td></tr>
+    <tr><td class="hdr">1</td><td id="r1r">—</td><td id="r1g">—</td><td id="r1b">—</td><td id="r1c">—</td><td id="r1i">—</td></tr>
+    <tr><td class="hdr">2</td><td id="r2r">—</td><td id="r2g">—</td><td id="r2b">—</td><td id="r2c">—</td><td id="r2i">—</td></tr>
+  </table>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ─── Three.js scene setup ───
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a12);
+scene.fog = new THREE.Fog(0x0a0a12, 80, 200);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+camera.position.set(60, 50, 60);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = true;
+document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x404060, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(50, 80, 50);
+dirLight.castShadow = true;
+scene.add(dirLight);
+
+// Grid
+const grid = new THREE.GridHelper(100, 20, 0x202040, 0x151530);
+scene.add(grid);
+
+// ─── Board geometry ───
+const BOARD_SIZE = 40;       // mm, square board side
+const BOARD_THICK = 2;       // mm
+const SENSOR_R = 15;         // mm, sensor radius from center
+const SENSOR_ANGLES = [0, 2*Math.PI/3, 4*Math.PI/3];
+
+// Bottom board (fixed)
+const bottomGeo = new THREE.BoxGeometry(BOARD_SIZE, BOARD_THICK, BOARD_SIZE);
+const bottomMat = new THREE.MeshPhongMaterial({ color: 0x2a2a4a, transparent: true, opacity: 0.8 });
+const bottomBoard = new THREE.Mesh(bottomGeo, bottomMat);
+bottomBoard.position.y = 0;
+scene.add(bottomBoard);
+
+// Top board (moves with joint state)
+const topGeo = new THREE.BoxGeometry(BOARD_SIZE, BOARD_THICK, BOARD_SIZE);
+const topMat = new THREE.MeshPhongMaterial({ color: 0x3a3a6a, transparent: true, opacity: 0.8 });
+const topBoard = new THREE.Mesh(topGeo, topMat);
+scene.add(topBoard);
+
+// Distance pillars (3, one per sensor pair)
+const pillarColors = [0xff4444, 0x44ff44, 0x4488ff];
+const pillars = [];
+const pillarLabels = ['d₀', 'd₁', 'd₂'];
+
+for (let i = 0; i < 3; i++) {
+    const geo = new THREE.CylinderGeometry(1.5, 1.5, 1, 8);
+    const mat = new THREE.MeshPhongMaterial({ color: pillarColors[i], transparent: true, opacity: 0.7 });
+    const pillar = new THREE.Mesh(geo, mat);
+    scene.add(pillar);
+    pillars.push(pillar);
+
+    // Sensor markers on bottom board
+    const markerGeo = new THREE.SphereGeometry(2, 16, 16);
+    const markerMat = new THREE.MeshPhongMaterial({ color: pillarColors[i] });
+    const marker = new THREE.Mesh(markerGeo, markerMat);
+    const x = SENSOR_R * Math.cos(SENSOR_ANGLES[i]);
+    const z = SENSOR_R * Math.sin(SENSOR_ANGLES[i]);
+    marker.position.set(x, BOARD_THICK/2, z);
+    scene.add(marker);
+}
+
+// ─── Update board positions from joint state ───
+function updateScene(state) {
+    if (!state || !state.d0) return;
+
+    const distances = [state.d0, state.d1, state.d2];
+
+    // Compute top board plane from three distances
+    // Sensor positions on bottom board
+    const pts = SENSOR_ANGLES.map((a, i) => ({
+        x: SENSOR_R * Math.cos(a),
+        z: SENSOR_R * Math.sin(a),
+        y: distances[i] + BOARD_THICK/2
+    }));
+
+    // Plane normal via cross product
+    const v1 = { x: pts[1].x - pts[0].x, y: pts[1].y - pts[0].y, z: pts[1].z - pts[0].z };
+    const v2 = { x: pts[2].x - pts[0].x, y: pts[2].y - pts[0].y, z: pts[2].z - pts[0].z };
+    let nx = v1.y * v2.z - v1.z * v2.y;
+    let ny = v1.z * v2.x - v1.x * v2.z;
+    let nz = v1.x * v2.y - v1.y * v2.x;
+    const nlen = Math.sqrt(nx*nx + ny*ny + nz*nz);
+    if (nlen > 0.001) { nx /= nlen; ny /= nlen; nz /= nlen; }
+    else { nx = 0; ny = 1; nz = 0; }
+
+    // Average height for top board center
+    const avgD = (distances[0] + distances[1] + distances[2]) / 3;
+    topBoard.position.set(0, avgD + BOARD_THICK/2, 0);
+
+    // Tilt the top board to match the plane normal
+    // The board's normal should align with (nx, ny, nz)
+    const tiltAxis = new THREE.Vector3(nz, 0, -nx).normalize(); // rotation axis in XZ plane
+    const tiltAngle = Math.acos(Math.max(-1, Math.min(1, ny))); // angle from vertical
+    if (tiltAxis.length() > 0.01 && tiltAngle > 0.001) {
+        topBoard.quaternion.setFromAxisAngle(tiltAxis, tiltAngle);
+    } else {
+        topBoard.quaternion.set(0, 0, 0, 1);
+    }
+
+    // Update pillars
+    for (let i = 0; i < 3; i++) {
+        const x = SENSOR_R * Math.cos(SENSOR_ANGLES[i]);
+        const z = SENSOR_R * Math.sin(SENSOR_ANGLES[i]);
+        const d = Math.max(0.1, distances[i]);
+        pillars[i].scale.y = d;
+        pillars[i].position.set(x, d/2 + BOARD_THICK/2, z);
+    }
+}
+
+// ─── UI update ───
+function updateUI(state) {
+    const statusEl = document.getElementById('status');
+    const status = state.status || 'unknown';
+    statusEl.textContent = status.toUpperCase();
+    statusEl.className = 'status ' + (status === 'ok' ? 'ok' : status.includes('error') ? 'error' : 'waiting');
+
+    if (state.d0 !== undefined) {
+        document.getElementById('d0').textContent = state.d0.toFixed(2) + ' mm';
+        document.getElementById('d1').textContent = state.d1.toFixed(2) + ' mm';
+        document.getElementById('d2').textContent = state.d2.toFixed(2) + ' mm';
+        const thetaDeg = (state.theta_geometric || 0) * 180 / Math.PI;
+        document.getElementById('theta').textContent = thetaDeg.toFixed(2) + ' °';
+        document.getElementById('costheta').textContent = (state.cos_theta || 1).toFixed(4);
+    }
+
+    if (state.raw) {
+        for (let i = 0; i < 3; i++) {
+            const r = state.raw[i];
+            const prefix = 'r' + i;
+            document.getElementById(prefix + 'r').textContent = r.R;
+            document.getElementById(prefix + 'g').textContent = r.G;
+            document.getElementById(prefix + 'b').textContent = r.B;
+            document.getElementById(prefix + 'c').textContent = r.C;
+            document.getElementById(prefix + 'i').textContent = r.IR;
+        }
+    }
+}
+
+// ─── WebSocket client ───
+const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsHost = window.location.hostname;
+const wsPort = window.location.port === '8080' ? '8081' : window.location.port;
+// If accessing from remote, use the same host but ws port
+const wsUrl = `${wsProtocol}//${wsHost}:8081`;
+console.log('Connecting to WebSocket:', wsUrl);
+
+let ws;
+function connectWS() {
+    ws = new WebSocket(wsUrl);
+    ws.onopen = () => { console.log('WebSocket connected'); };
+    ws.onmessage = (event) => {
+        const state = JSON.parse(event.data);
+        updateScene(state);
+        updateUI(state);
+    };
+    ws.onclose = () => {
+        console.log('WebSocket closed, reconnecting in 2s...');
+        setTimeout(connectWS, 2000);
+    };
+    ws.onerror = (err) => { console.error('WebSocket error:', err); };
+}
+connectWS();
+
+// ─── Resize handler ───
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── Mouse controls (simple orbit) ───
+let isDragging = false, prevX = 0, prevY = 0;
+let camAngle = Math.PI/4, camElev = Math.PI/5, camDist = 90;
+
+function updateCamera() {
+    camera.position.x = camDist * Math.cos(camElev) * Math.cos(camAngle);
+    camera.position.z = camDist * Math.cos(camElev) * Math.sin(camAngle);
+    camera.position.y = camDist * Math.sin(camElev);
+    camera.lookAt(0, 15, 0);
+}
+updateCamera();
+
+renderer.domElement.addEventListener('mousedown', (e) => { isDragging = true; prevX = e.clientX; prevY = e.clientY; });
+window.addEventListener('mouseup', () => { isDragging = false; });
+window.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    camAngle -= (e.clientX - prevX) * 0.01;
+    camElev += (e.clientY - prevY) * 0.01;
+    camElev = Math.max(0.1, Math.min(Math.PI/2 - 0.1, camElev));
+    prevX = e.clientX; prevY = e.clientY;
+    updateCamera();
+});
+renderer.domElement.addEventListener('wheel', (e) => {
+    camDist += e.deltaY * 0.1;
+    camDist = Math.max(30, Math.min(200, camDist));
+    updateCamera();
+});
+
+// ─── Animation loop ───
+function animate() {
+    requestAnimationFrame(animate);
+    renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

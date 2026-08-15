@@ -41,15 +41,30 @@ This is the topology emb_fwtk is designed around.
 - **The landmine is DWARF paths, not the mount.** The ELF embeds build-time
   absolute paths (`/workspace/...`). On the host those paths don't exist, so
   Ozone drops to disassembly-only breakpoints.
-- Fix at build time: add to the firmware's CMake
+- Fix (either works, can combine):
+  - **Build-time remap** (tool-agnostic): add to the firmware's CMake
 
-  ```
-  -ffile-prefix-map=/workspace=<host-visible mount point>
-  ```
+    ```
+    -ffile-prefix-map=/workspace=<host-visible mount point>
+    ```
 
-  The ELF then points wherever the debugger lives. Ozone does not have a
-  GDB-style `set substitute-path` equivalent (as of V3.30 — verify if it
-  matters to you), so build-time remapping is the reliable route.
+    The ELF then points wherever the debugger lives.
+  - **Ozone-side substitution** (verified, SEGGER KB "Make Ozone projects
+    portable"): in the `.jdebug` project file —
+
+    ```c
+    void OnProjectLoad(void) {
+      File.Open("firmware.elf");   // relative ELF path = portable
+      Project.AddPathSubstitute("/workspace/RGBSensingModule", "$(ProjectDir)");
+    }
+    ```
+
+    This is Ozone's equivalent of GDB's `set substitute-path`: it rewrites
+    the build-time prefix in DWARF to a client-local path. Two caveats:
+    substitution applies only to *unresolved* paths (Ozone tries the raw
+    path first), and it is **case-sensitive** — add a lowercase-variant
+    entry too if the build path has capitals. Affects source resolution
+    only; flashing, breakpoints, RTT, connectivity are untouched.
 - The mount only needs to cover *source*; the ELF itself is self-contained.
 
 Use when: the toolchain must run where the probes are (no cross-build on host),

@@ -6,6 +6,7 @@ Documentation for using and extending the toolkit.
 
 - [Debug Topologies](debug-topologies.md) — the three ways to wire up host / slave / target, and when to use each
 - [Known Quirks](known-quirks.md) — empirically discovered gotchas (J-Link port+1, USB settle, zombies, relay latency)
+- [Extending to Other Targets](EXTENDING.md) — what changes for non-STM32/non-J-Link (ESP32-S3 worked example)
 
 ## Quick reference
 

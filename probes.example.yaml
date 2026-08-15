@@ -3,9 +3,16 @@
 # manage_debug reads it at runtime (bind-mount or bake it in).
 #
 # Fields per probe:
-#   serial          J-Link probe serial number (required) — find with
+#   serial          J-Link probe serial number (J-Link probes) — find with
 #                   `manage_debug list` or lsusb; ST-Link clones flashed as
 #                   J-Link report theirs via JLinkExe -USB <n>
+#   port            USB serial port path (non-J-Link probes, e.g. ESP32-S3
+#                   built-in USB-JTAG): "/dev/ttyACM0". Use this instead of
+#                   "serial" for probe types that aren't J-Link.
+#   type            probe type: "jlink" (default) | "esp_usb_jtag" | "ftdi"
+#   flash_method    "openocd" (default — OpenOCD program command, ARM/ELF) |
+#                   "esptool" (ESP32 — multi-blob via esptool, see docs/EXTENDING.md)
+#   flash_offsets   for esptool: map of {bootloader, partition, app} → address
 #   role            free text, human reference only (optional)
 #   openocd_config  path to this probe's OpenOCD config, relative to this
 #                   file (optional — defaults to openocd/<name>.cfg)
@@ -18,6 +25,18 @@
 # Top-level:
 #   port_offset     shift ALL auto-assigned ports by this (multi-container
 #                   --network host setups)
+#
+# --- ESP32-S3 example (stub — see docs/EXTENDING.md) ---
+# probes:
+#   esp-board-1:
+#     type: esp_usb_jtag
+#     port: "/dev/ttyACM0"
+#     flash_method: esptool
+#     flash_offsets:
+#       bootloader: 0x0
+#       partition: 0x8000
+#       app: 0x10000
+#     openocd_config: "openocd/esp32s3.cfg"
 
 port_offset: 0
 

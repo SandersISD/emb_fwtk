@@ -142,9 +142,16 @@ def load_config(path: str = DEFAULT_CONFIG) -> dict:
         if not isinstance(probe, dict):
             eprint(f"ERROR: probe '{name}' is not a dict")
             sys.exit(1)
-        if "serial" not in probe:
-            eprint(f"ERROR: probe '{name}' missing 'serial'")
+        # J-Link probes use "serial"; non-J-Link (e.g. ESP32 built-in USB-JTAG)
+        # use "port" instead. Either is required.
+        if "serial" not in probe and "port" not in probe:
+            eprint(f"ERROR: probe '{name}' missing both 'serial' and 'port' "
+                   f"(J-Link probes use serial; ESP32 built-in USB-JTAG uses port)")
             sys.exit(1)
+        probe.setdefault("serial", "")
+        probe.setdefault("port", "")
+        probe.setdefault("type", "jlink")
+        probe.setdefault("flash_method", "openocd")
         probe.setdefault("openocd_config", "")
         probe.setdefault("role", "unspecified")
         probe.setdefault("ports", {})
@@ -167,9 +174,13 @@ def auto_assign_ports(cfg: dict) -> dict:
         # next probe's port colliding with this probe's port+1 binding.
         remote = pcfg.get("remote", BASE_REMOTE + 2 * i + offset)
         assigned[name] = {
-            "serial": probe["serial"],
+            "serial": probe.get("serial", ""),
             "role": probe.get("role", "unspecified"),
+            "type": probe.get("type", "jlink"),
+            "port": probe.get("port", ""),
             "openocd_config": probe.get("openocd_config", ""),
+            "flash_method": probe.get("flash_method", "openocd"),
+            "flash_offsets": probe.get("flash_offsets", {}),
             "telnet": telnet,
             "gdb": gdb,
             "remote": remote,
@@ -744,6 +755,23 @@ def cmd_flash(args: argparse.Namespace, cfg: dict, pm: ProcessManager) -> dict:
 
     info = assigned[target]
     config_dir = os.path.dirname(os.path.abspath(args.config or DEFAULT_CONFIG))
+
+    # Flash dispatch — per-probe method (default: openocd). See docs/EXTENDING.md
+    # for adding new methods (e.g. esptool for ESP32-S3).
+    flash_method = info.get("flash_method", "openocd")
+
+    if flash_method != "openocd":
+        return {
+            "_text": (
+                f"ERROR: flash_method '{flash_method}' for '{target}' is not "
+                f"implemented yet. Only 'openocd' is supported. "
+                f"See docs/EXTENDING.md for how to add {flash_method}.\n"
+            ),
+            "error": f"flash_method not implemented: {flash_method}",
+            "target": target,
+            "flash_method": flash_method,
+        }
+
     cfg_path = info["openocd_config"]
     if not cfg_path:
         cfg_path = os.path.join(config_dir, "openocd", f"{target}.cfg")

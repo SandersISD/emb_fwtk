@@ -787,7 +787,14 @@ def cmd_flash(args: argparse.Namespace, cfg: dict, pm: ProcessManager) -> dict:
     # Stop any running services first
     pm.stop_all()
 
-    # Flash sequence: init -> halt -> program -> verify -> reset -> shutdown
+    # OpenOCD's `program` command: for ELF files, section addresses come
+    # from the ELF itself — passing an offset ADDS to them (0x08000000 +
+    # 0x08000000 = 0x10000000 = system memory → verify fails). Only pass
+    # the address for raw .bin files.
+    if elf_path.endswith((".elf", ".ELF")):
+        program_cmd = f"program {elf_path} verify"
+    else:
+        program_cmd = f"program {elf_path} verify 0x08000000"
     flash_cmd = [
         OPENOCD_BIN,
         "-f", cfg_path,
@@ -796,7 +803,7 @@ def cmd_flash(args: argparse.Namespace, cfg: dict, pm: ProcessManager) -> dict:
         "-c", "telnet_port disabled",
         "-c", "init",
         "-c", "halt",
-        "-c", f"program {elf_path} verify 0x08000000",
+        "-c", program_cmd,
         "-c", "reset run",
         "-c", "shutdown",
     ]

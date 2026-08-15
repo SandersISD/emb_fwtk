@@ -203,8 +203,25 @@ def check_port_collisions(assigned: dict) -> list[str]:
 # ─── Lock Management ─────────────────────────────────────────────────────────
 
 
+def _lock_pid_alive(lock_data: dict) -> bool:
+    """Check if the PID holding the lock is still alive."""
+    pid = lock_data.get("pid")
+    if not isinstance(pid, int):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def acquire_lock(force: bool = False) -> bool:
-    """Acquire the session lock. Returns True if acquired."""
+    """Acquire the operation lock. Returns True if acquired.
+
+    A lock held by a DEAD process is treated as stale and reclaimed
+    automatically (docker exec processes are ephemeral). A lock held by a
+    live process blocks, unless force=True.
+    """
     if os.path.exists(LOCKFILE):
         try:
             with open(LOCKFILE) as f:
@@ -212,12 +229,15 @@ def acquire_lock(force: bool = False) -> bool:
         except (json.JSONDecodeError, OSError):
             data = {}
 
-        if force:
-            eprint(f"WARNING: Breaking stale lock held by PID {data.get('pid', '?')}")
+        held_by_live_process = _lock_pid_alive(data)
+
+        if force or not held_by_live_process:
+            state = "live" if held_by_live_process else "stale"
+            eprint(f"WARNING: Breaking {state} lock held by PID {data.get('pid', '?')}")
             release_lock()
         else:
             eprint(
-                f"ERROR: Lock held by PID {data.get('pid', '?')} "
+                f"ERROR: Operation lock held by live PID {data.get('pid', '?')} "
                 f"(command: {data.get('command', '?')}, "
                 f"since: {data.get('timestamp', '?')})"
             )
@@ -257,18 +277,92 @@ def lock_held() -> bool:
 
 
 class ProcessManager:
-    """Manages background processes for OpenOCD and JLinkRemoteServer."""
+    """Manages background daemon processes for OpenOCD / JLinkRemoteServer.
+
+    IMPORTANT DESIGN CONSTRAINT:
+    manage_debug is invoked via `docker exec` — a NEW process each time. Popen
+    handles held in memory die with that process. Therefore discovery and
+    control of already-running daemons MUST go through the process table
+    (pgrep), not in-memory handles. A new PM instance starts empty and
+    discovers daemons by name + argument matching.
+
+    Daemons are started detached (start_new_session=True) so they survive
+    manage_debug's exit and are re-parented to PID 1 in the container.
+    """
 
     def __init__(self):
-        self.processes: dict[str, subprocess.Popen] = {}
+        self.processes: dict[str, subprocess.Popen] = {}  # only Popen'd this run
+
+    # ── discovery ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _pgrep(pattern: str) -> list[int]:
+        """Return PIDs matching a pgrep pattern (full command line)."""
+        try:
+            r = subprocess.run(
+                ["pgrep", "-f", pattern],
+                capture_output=True, text=True, timeout=5,
+            )
+            return [int(p) for p in r.stdout.split() if p.strip().isdigit()]
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+            return []
+
+    def find_daemons(self) -> dict[str, dict]:
+        """Find running openocd / JLinkRemoteServerCLExe daemons in the
+        container's PID namespace, keyed by probe name when identifiable.
+
+        Matching is by full command line:
+          openocd ... -f /path/to/openocd/board-a.cfg ...
+          JLinkRemoteServerCLExe -select usb=SERIAL -port N
+        """
+        daemons = {}
+
+        # OpenOCD instances — identify probe by its config path
+        for pid in self._pgrep("openocd"):
+            try:
+                with open(f"/proc/{pid}/cmdline") as f:
+                    argv = f.read().split("\0")
+            except OSError:
+                continue
+            if not argv or "openocd" not in os.path.basename(argv[0]):
+                # pgrep -f matches manage_debug's own command line too; skip
+                continue
+            # Extract probe name from config path: openocd/board-a.cfg → board-a
+            name = None
+            for a in argv:
+                if a.endswith(".cfg") and "board" in os.path.basename(a):
+                    name = os.path.splitext(os.path.basename(a))[0]
+                    break
+            daemons[name or f"openocd-{pid}"] = {
+                "pid": pid, "type": "openocd", "argv": argv,
+            }
+
+        # JLinkRemoteServer instances — identify probe by serial or port
+        for pid in self._pgrep("JLinkRemoteServerCLExe"):
+            try:
+                with open(f"/proc/{pid}/cmdline") as f:
+                    argv = f.read().split("\0")
+            except OSError:
+                continue
+            serial = port = None
+            for i, a in enumerate(argv):
+                if a == "-select" and i + 1 < len(argv):
+                    serial = argv[i + 1].replace("usb=", "")
+                elif a == "-port" and i + 1 < len(argv):
+                    port = argv[i + 1]
+            name = f"remote-{serial or port or pid}"
+            daemons[name] = {
+                "pid": pid, "type": "jlink-remote",
+                "argv": argv, "serial": serial, "port": port,
+            }
+
+        return daemons
+
+    # ── start ────────────────────────────────────────────────────────────────
 
     def start_openocd(self, name: str, config_path: str, telnet_port: int,
                       gdb_port: int, serial: str) -> bool:
-        """Start OpenOCD for one probe."""
-        if name in self.processes:
-            eprint(f"WARNING: {name} already running, skipping")
-            return False
-
+        """Start OpenOCD (detached) for one probe."""
         if not os.path.isfile(config_path):
             eprint(f"ERROR: OpenOCD config not found: {config_path}")
             return False
@@ -280,23 +374,23 @@ class ProcessManager:
             "-c", f"gdb_port {gdb_port}",
             "-c", "tcl_port disabled",
         ]
-        # Add adapter serial if given
         if serial:
-            cmd.append("-c")
-            cmd.append(f"adapter serial {serial}")
+            cmd += ["-c", f"adapter serial {serial}"]
 
+        log_path = f"/tmp/openocd-{name}.log"
         try:
-            self.processes[name] = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            # Brief wait to check if it crashed
-            time.sleep(0.5)
-            if self.processes[name].poll() is not None:
-                eprint(f"ERROR: OpenOCD for '{name}' exited immediately "
-                       f"(exit code {self.processes[name].returncode})")
-                del self.processes[name]
+            with open(log_path, "w") as log:
+                subprocess.Popen(
+                    cmd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,  # detach: survive parent exit
+                )
+            # Give OpenOCD a moment to fail on config errors before reporting OK
+            time.sleep(1.0)
+            running = bool(self._pgrep(" ".join(cmd[:4])))
+            if not running:
+                self._report_log(log_path, name)
                 return False
             return True
         except FileNotFoundError:
@@ -307,32 +401,26 @@ class ProcessManager:
             return False
 
     def start_remote(self, name: str, serial: str, port: int) -> bool:
-        """Start JLinkRemoteServer for one probe."""
-        if name in self.processes:
-            eprint(f"WARNING: {name} already running, skipping")
-            return False
-
+        """Start JLinkRemoteServerCLExe (detached) for one probe."""
         if not os.path.isfile(JLINK_REMOTE):
             eprint(f"ERROR: JLinkRemoteServer not found at {JLINK_REMOTE}")
             return False
 
-        cmd = [
-            JLINK_REMOTE,
-            "-select", f"usb={serial}",
-            "-port", str(port),
-        ]
+        cmd = [JLINK_REMOTE, "-select", f"usb={serial}", "-port", str(port)]
+        log_path = f"/tmp/jlink-remote-{name}.log"
 
         try:
-            self.processes[name] = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            time.sleep(0.5)
-            if self.processes[name].poll() is not None:
-                eprint(f"ERROR: JLinkRemoteServer for '{name}' exited immediately "
-                       f"(exit code {self.processes[name].returncode})")
-                del self.processes[name]
+            with open(log_path, "w") as log:
+                subprocess.Popen(
+                    cmd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            time.sleep(1.5)
+            running = bool(self._pgrep("JLinkRemoteServerCLExe"))
+            if not running:
+                self._report_log(log_path, name)
                 return False
             return True
         except FileNotFoundError:
@@ -342,30 +430,83 @@ class ProcessManager:
             eprint(f"ERROR: Failed to start JLinkRemoteServer for '{name}': {e}")
             return False
 
+    @staticmethod
+    def _report_log(log_path: str, name: str) -> None:
+        """Print the tail of a daemon log after startup failure."""
+        eprint(f"ERROR: daemon for '{name}' exited immediately. Log tail:")
+        try:
+            with open(log_path) as f:
+                lines = f.read().splitlines()
+            for line in lines[-15:]:
+                eprint(f"  | {line}")
+        except OSError:
+            eprint(f"  (no log at {log_path})")
+
+    # ── stop ─────────────────────────────────────────────────────────────────
+
     def stop_all(self) -> None:
-        """Stop all managed processes."""
+        """Stop ALL openocd / JLinkRemoteServer daemons in this container
+        (discovered via process table), plus any Popen'd this run."""
+        killed = []
+        # 1) daemons from the process table
+        for name, info in self.find_daemons().items():
+            pid = info["pid"]
+            try:
+                os.kill(pid, signal.SIGTERM)
+                # wait up to 3s for graceful exit
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    try:
+                        os.kill(pid, 0)  # raises if gone
+                        time.sleep(0.1)
+                    except OSError:
+                        break
+                else:
+                    os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError as e:
+                eprint(f"WARNING: failed to kill {name} (pid {pid}): {e}")
+                continue
+            killed.append(f"{name}({info['type']})")
+
+        # 2) any processes we Popen'd in this run (defensive)
         for name, proc in list(self.processes.items()):
             try:
                 proc.terminate()
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
                 try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.wait(timeout=3)
-            except OSError:
-                pass
+                except OSError:
+                    pass
             del self.processes[name]
 
-    def get_status(self) -> dict[str, str]:
-        """Return status dict: name -> 'running' or 'stopped'."""
-        status = {}
-        for name, proc in self.processes.items():
-            ret = proc.poll()
-            status[name] = "running" if ret is None else f"exited({ret})"
-        return status
+        if killed:
+            eprint(f"Stopped: {', '.join(killed)}")
+            # USB device release is not instant — give the kernel 1.5s to
+            # settle after the last daemon is killed before a new one claims it.
+            time.sleep(1.5)
 
-    def __del__(self):
-        self.stop_all()
+    # ── status ───────────────────────────────────────────────────────────────
+
+    def get_status(self) -> dict[str, dict]:
+        """Return discovered daemons: name -> {pid, type, status}."""
+        status = {}
+        for name, info in self.find_daemons().items():
+            alive = True
+            try:
+                os.kill(info["pid"], 0)
+            except OSError:
+                alive = False
+            status[name] = {
+                "pid": info["pid"],
+                "type": info["type"],
+                "status": "running" if alive else "dead",
+                **({"serial": info["serial"], "port": info["port"]}
+                   if info.get("type") == "jlink-remote" else {}),
+            }
+        return status
 
 
 # ─── Subcommand Implementations ──────────────────────────────────────────────
@@ -415,14 +556,14 @@ def cmd_status(args: argparse.Namespace, cfg: dict, pm: ProcessManager) -> dict:
     assigned = auto_assign_ports(cfg)
     proc_status = pm.get_status()
 
-    # Detect active session type
-    running = [n for n, s in proc_status.items() if s == "running"]
-    session_type = "none"
-    if running:
-        # Check what kind of processes are running
-        # We track this by checking if processes are OpenOCD or JLink remote
-        # For now, just check if lockfile exists and has context
-        pass
+    # Detect active session type from discovered daemons
+    types = {s["type"] for s in proc_status.values() if s["status"] == "running"}
+    if "openocd" in types:
+        session_type = "ocd"
+    elif "jlink-remote" in types:
+        session_type = "remote"
+    else:
+        session_type = "none"
 
     lock_info = None
     if os.path.exists(LOCKFILE):
@@ -440,6 +581,8 @@ def cmd_status(args: argparse.Namespace, cfg: dict, pm: ProcessManager) -> dict:
         "configured_probes": assigned,
     }
 
+    result["_text"] += f"\nSession: {session_type}\n"
+
     if lock_info:
         result["_text"] += (
             f"\nLock held by PID {lock_info['pid']}\n"
@@ -449,9 +592,13 @@ def cmd_status(args: argparse.Namespace, cfg: dict, pm: ProcessManager) -> dict:
     else:
         result["_text"] += "\nNo lock held\n"
 
-    result["_text"] += f"\nRunning processes: {len(running)} active\n"
+    running = [n for n, s in proc_status.items() if s["status"] == "running"]
+    result["_text"] += f"\nRunning daemons: {len(running)} active\n"
     for name, status in proc_status.items():
-        result["_text"] += f"  {name}: {status}\n"
+        extra = ""
+        if status.get("type") == "jlink-remote":
+            extra = f"  (serial={status.get('serial')}, port={status.get('port')})"
+        result["_text"] += f"  {name}: {status['status']} [{status['type']}]{extra}\n"
 
     if not running:
         result["_text"] += "  (none)\n"
@@ -822,9 +969,12 @@ def main() -> int:
         eprint(f"ERROR: {e}")
         return 1
     finally:
-        # Only release lock if we acquired it and it's not a mode command
-        # (mode keeps the lock for the session duration)
-        if needs_lock and args.subcommand in ("stop", "flash"):
+        # Lock semantics:
+        # - mode ocd / mode remote: the lockfile IS the session state — keep it
+        #   (daemons keep running after this process exits). The lock records
+        #   the active mode; `stop` clears it.
+        # - flash / stop: transient operations — always release on exit.
+        if needs_lock and args.subcommand in ("flash", "stop"):
             release_lock()
 
 

@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         netcat-openbsd \
         python3 \
         python3-numpy \
-        python3-pip \
+        python3-yaml \
         python3-websockets \
         gcc-arm-none-eabi \
         binutils-arm-none-eabi \
@@ -29,9 +29,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openocd \
         libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
-
-# ─── Python packages ────────────────────────────────────────────────────────
-RUN pip3 install --no-cache-dir pyyaml
 
 # ─── SEGGER J-Link Software ──────────────────────────────────────────────────
 # The J-Link tarball must be downloaded separately (SEGGER license click-through).

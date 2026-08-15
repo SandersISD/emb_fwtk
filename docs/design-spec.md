@@ -1,31 +1,30 @@
 ---
 title: "emb_fwtk Container Redesign — Unified Debug Environment"
 date: "2026-08-15"
-project: "sca"
 type: spec
 status: accepted
-tags: [spec, sca, emb_fwtk, docker, openocd, segger]
+tags: [spec, emb_fwtk, docker, openocd, segger]
 ---
 
 # emb_fwtk Container Redesign — Unified Debug Environment
 
 ## Problem Statement
 
-The current `emb_fwtk` Docker setup requires two separate containers (one per debug probe) to run OpenOCD on the Pi. This causes two classes of bugs:
+A naive multi-probe setup runs one container per probe (one per debug probe) to run OpenOCD on the Pi. This causes two classes of bugs:
 
 1. **`LIBUSB_ERROR_BUSY`** — both containers hold the same USB device node, and when switching between them the second container can't claim the probe.
 2. **`tcl_port 6666` collision** — both containers bind the same port under `--network host`, causing OpenOCD startup failures.
 
-Additionally, there is no support for SEGGER Ozone GUI debugging. The only debug path is OpenOCD telnet, which means the human operator cannot use Ozone's visual debugger (breakpoints, register inspection, RTT, flash programming GUI) from their M3 Mac.
+Additionally, there is no support for SEGGER Ozone GUI debugging. The only debug path is OpenOCD telnet, which means the human operator cannot use Ozone's visual debugger (breakpoints, register inspection, RTT, flash programming GUI) from a remote machine.
 
-The toolkit should also be reusable across future projects with arbitrary numbers of debug probes, not just the current 2-board SCA setup.
+The toolkit should also be reusable across future projects with arbitrary numbers of debug probes, not just the initial two-board setup.
 
 ## Solution
 
 A single Docker container that holds both OpenOCD and SEGGER J-Link software, with a `manage_debug` Python script that arbitrates between two mutually exclusive debug sessions:
 
 - **`ocd-session`** — OpenOCD running on all probes, for Python sensor scripts (`read_sensor.py`, `collect_calibration.py`, `capture_check.py`) and command-line flash.
-- **`ozone-session`** — J-Link Remote Server running on all probes, for Ozone GUI debugging from the M3 Mac over Tailscale.
+- **`ozone-session`** — J-Link Remote Server running on all probes, for Ozone GUI debugging from a remote machine over the network.
 
 A `probes.yaml` config file (bind-mounted at runtime) maps logical probe names to serial numbers, roles, and optional port overrides. Ports are auto-assigned by default with optional override.
 
@@ -35,7 +34,7 @@ A `probes.yaml` config file (bind-mounted at runtime) maps logical probe names t
 
 2. As a developer, I want to run `manage_debug mode ocd` to start OpenOCD on all probes, so I can run Python sensor scripts via telnet.
 
-3. As a developer, I want to run `manage_debug mode remote` to start J-Link Remote Server on all probes, so I can connect Ozone from my M3 Mac.
+3. As a developer, I want to run `manage_debug mode remote` to start J-Link Remote Server on all probes, so I can connect Ozone from a remote machine.
 
 4. As a developer, I want `manage_debug mode ocd` and `mode remote` to be mutually exclusive — switching modes stops the other session first — so there is never a USB contention.
 
@@ -235,9 +234,9 @@ Additions:
 - `mode ocd` while lock held → exit code 2
 - `mode ocd --force` while lock held → succeeds
 
-### Seam 5: Ozone Remote (needs M3 Mac + Tailscale)
+### Seam 5: Ozone Remote (needs a second machine)
 
-- Ozone connects to `raspi5-03 Tailscale IP:19020`
+- Ozone connects to `<probe-host>:19020`
 - Halt, step, breakpoint, register read, RTT all work
 - Ozone connects to port 19021 for board B
 
@@ -280,7 +279,7 @@ Additions:
 
 | Term | Definition |
 |------|------------|
-| **emb_fwtk** | Embedded Firmware Development Toolkit — Docker container + scripts for SCA firmware development |
+| **emb_fwtk** | Embedded Firmware Development Toolkit — Docker container + scripts for firmware development |
 | **OpenOCD** | Open On-Chip Debugger — open-source debug tool for ARM microcontrollers |
 | **J-Link Remote Server** | SEGGER utility that makes a USB J-Link probe accessible over TCP/IP |
 | **Ozone** | SEGGER's GUI debugger for J-Link probes |

@@ -1,269 +1,115 @@
-# emb_fwtk — Embedded Firmware Development Toolkit
+# emb_fwtk — Embedded Firmware Debug Toolkit
 
-Dockerized development environment for STM32G4 firmware, with **two debug modes** (OpenOCD for Python scripting, J-Link Remote Server for Ozone GUI debugging) and a **USB arbitration manager** that cleanly switches between them.
+One Docker container, two debug modes, one USB arbiter. Run OpenOCD for
+scripted/agent access **or** SEGGER J-Link Remote Server for GUI debugging
+(Ozone), and switch between them without ever seeing `LIBUSB_ERROR_BUSY`.
 
-**Docs:** see [docs/](docs/index.md) — the wiki, including [Debug Topologies](docs/debug-topologies.md) (three ways to arrange host/slave/target) and [Known Quirks](docs/known-quirks.md) (hardware-verified gotchas).
+Works with any J-Link-compatible probe and SWD target (built and battle-tested
+with STM32G4 + two probes on a Raspberry Pi 5; see `examples/sca`).
 
-> emb_fwtk is project-agnostic. SCA (RGB sensing) is its first user; the
-> toolkit itself is reusable for any J-Link/SWD debug setup.
+## Why
 
-## Quick Start
+Multi-probe embedded setups hit the same three walls:
 
-### 1. Prerequisites
+1. **USB contention** — two debug servers, one USB device each, constant
+   `LIBUSB_ERROR_BUSY` when both grab the same probe.
+2. **Port collisions** — under `--network host`, every OpenOCD defaults to
+   telnet 4444 / tcl 6666 and they stamp on each other.
+3. **Human vs agent** — you want Ozone; your scripts/agents want telnet.
+   Same probes, different tools.
 
-- Docker on an **ARM64 Linux host** (Raspberry Pi 5 / Debian 13)
-- One or more **SEGGER J-Link probes** connected via USB
-- **J-Link ARM64 software pack** (download required, see Step 3)
+`manage_debug` arbitrates: one session type at a time, per-probe unique
+ports (`tcl_port disabled` always), stop-before-start with USB settle time,
+lockfile against concurrent operators, JSON output for automation.
 
-### 2. Clone + configure
-
-```bash
-git clone <repo-url> emb_fwtk
-cd emb_fwtk
-```
-
-Edit `probes.yaml` to match your hardware:
-
-```yaml
-port_offset: 0
-probes:
-  board-a:
-    serial: "000770593783"
-    role: "emitter"
-    openocd_config: "openocd/board-a.cfg"
-  board-b:
-    serial: "000775604909"
-    role: "receiver"
-    openocd_config: "openocd/board-b.cfg"
-```
-
-### 3. Download J-Link software
-
-SEGGER requires a click-through license agreement. Download the **Linux ARM64 .tgz** from:
-
-https://www.segger.com/downloads/jlink/#J-LinkSoftwareAndDocumentationPack
-
-Place it in the repo root:
+## Quick start
 
 ```bash
-mv ~/Downloads/JLink_Linux_V968_arm64.tgz emb_fwtk/JLink_Linux_arm64.tgz
-file JLink_Linux_arm64.tgz   # should show: gzip compressed data
-```
+# 1. Get the J-Link pack (license click-through, one time)
+#    https://www.segger.com/downloads/jlink/  → JLink_Linux_arm64.tgz
+cp ~/Downloads/JLink_Linux_V*_arm64.tgz ./JLink_Linux_arm64.tgz
 
-The tarball is excluded from git (`.gitignore`). You only need to download it once.
+# 2. Describe your probes
+cp probes.example.yaml probes.yaml      # edit serials
+cp openocd/probe.example.cfg openocd/my-board.cfg
 
-### 4. Build the container
-
-```bash
-docker build -t emb-fwtk:latest .
-```
-
-### 5. Run
-
-```bash
-# Option A: --network host (Pi, recommended)
-docker run -d --rm --privileged --network host \
+# 3. Build & run (ARM64 host: Pi, Jetson, ARM server)
+docker build -t emb-fwtk .
+docker run -d --rm --privileged --network host --init \
   -v /dev/bus/usb:/dev/bus/usb \
-  -v /home/pi/main_ws:/workspace \
-  -v $(pwd)/probes.yaml:/workspace/emb_fwtk/probes.yaml \
-  --name emb-fwtk emb-fwtk:latest \
-  tail -f /dev/null
+  -v $PWD:/cfg -v ~/myproject:/workspace \
+  --name emb-fwtk emb-fwtk tail -f /dev/null
 
-# Option B: --network bridge (laptop, with port mappings)
-docker run -d --rm --privileged \
-  -v /dev/bus/usb:/dev/bus/usb \
-  -v /home/user/main_ws:/workspace \
-  -v $(pwd)/probes.yaml:/workspace/emb_fwtk/probes.yaml \
-  -p 4444:4444 -p 4445:4445 \
-  -p 3333:3333 -p 3334:3334 \
-  -p 19020:19020 -p 19021:19021 \
-  --name emb-fwtk emb-fwtk:latest \
-  tail -f /dev/null
+# 4. Debug
+docker exec emb-fwtk manage_debug --config /cfg/probes.yaml mode ocd
+docker exec emb-fwtk manage_debug --config /cfg/probes.yaml mode remote
 ```
 
-### 6. Verify probes
+## manage_debug reference
 
-```bash
-docker exec emb-fwtk manage_debug list
-```
+| Command | What it does | Locks |
+|---|---|---|
+| `list [--json]` | probes in config + USB-detected, assigned ports | no |
+| `status [--json]` | active session type, daemons (pgrep-discovered), lock holder | no |
+| `mode ocd` | stop all → start OpenOCD per probe (unique telnet/gdb, tcl disabled) | yes |
+| `mode remote` | stop all → start JLinkRemoteServer per probe (stride-2 ports) | yes |
+| `flash <probe> <elf>` | transient: stop → init/halt/program/verify/reset → stop | yes |
+| `stop` | kill all daemons, release lock | yes |
+| `rescan` | re-probe USB after hot-plug | no |
 
-Expected output:
+Exit codes: `0` ok, `1` error, `2` busy (lock held by a live process — dead
+PIDs are auto-reclaimed; `--force` breaks live locks).
 
-```
-=== Probes ===
+Ports auto-assign: telnet `4444+i`, gdb `3333+i`, remote `19020+2i`
+(JLinkRemoteServer binds port **and** port+1 — stride 2 is not optional;
+see `docs/known-quirks.md`). Override per probe or shift everything with
+`port_offset`.
 
-board-a:
-  serial=000770593783
-  telnet=4444  gdb=3333  remote=19020
-  role=emitter
+## Debugging from another machine (Ozone)
 
-board-b:
-  serial=000775604909
-  telnet=4445  gdb=3334  remote=19021
-  role=receiver
+Three topologies, one container — full write-up in
+[docs/debug-topologies.md](docs/debug-topologies.md):
 
-USB-detected: 2 J-Link probe(s)
-```
+1. **Probe server** (recommended): project + ELF on your machine, container
+   on the probe host. Open the ELF locally, connect Ozone via
+   `Project.SetHostIF("IP", "host:19020")` — through an SSH tunnel if not
+   same-LAN.
+2. **Everything on the probe host**: sources there, mount them (SMB /
+   SSHFS-Win), and remap DWARF paths — either `-ffile-prefix-map` at build
+   time or `Project.AddPathSubstitute()` in the `.jdebug` (Ozone's
+   `set substitute-path` equivalent).
+3. **Relayed / multi-VPN**: tunnel terminates on a bridge node with autossh;
+   from your machine it's topology 1 again.
 
-## Usage
+`examples/sca/boardA.jdebug` is a working project file: remote host, SVD,
+FreeRTOS kernel awareness, path substitution for a container-built ELF.
 
-### OpenOCD Session (Python scripting)
-
-```bash
-# Start OpenOCD on all probes
-docker exec emb-fwtk manage_debug mode ocd
-
-# Read sensor data
-docker exec emb-fwtk python3 /workspace/emb_fwtk/scripts/read_sensor.py --port 4444
-
-# Collect calibration data
-docker exec emb-fwtk python3 /workspace/emb_fwtk/scripts/collect_calibration.py \
-  --port-emit 4444 --port-recv 4445
-
-# Flash firmware
-docker exec emb-fwtk manage_debug flash board-a /workspace/firmware.elf
-```
-
-### Ozone Session (GUI debugging from M3 Mac)
-
-```bash
-# On Pi: start J-Link Remote Server
-docker exec emb-fwtk manage_debug mode remote
-
-# On M3 Mac: Open Ozone
-# Tools → J-Link Settings → Host Interface → Ethernet
-# IP: <raspi5-03 Tailscale IP>
-# Port: 19020 (board A) or 19021 (board B)
-# Interface: SWD, Speed: 1 MHz
-# Device: STM32G431CB
-```
-
-### Switch modes
-
-```bash
-# Stop current session, start another
-docker exec emb-fwtk manage_debug mode ocd       # switch to OpenOCD
-docker exec emb-fwtk manage_debug mode remote     # switch to Remote Server
-docker exec emb-fwtk manage_debug stop            # stop everything
-```
-
-Modes are **mutually exclusive**. Switching kills the other session first.
-
-### Agent-friendly output
-
-```bash
-docker exec emb-fwtk manage_debug list --json
-docker exec emb-fwtk manage_debug status --json
-```
-
-### Lock management
-
-```bash
-# If a lock is stale (e.g. subagent crashed), use --force
-docker exec emb-fwtk manage_debug mode ocd --force
-```
-
-## File Layout
+## Repository layout
 
 ```
-emb_fwtk/
-├── README.md                           ← this file
-├── Dockerfile                          ← ARM64 Debian 13 + OpenOCD + J-Link + Python
-├── probes.yaml                         ← YOUR probe config (bind-mounted at runtime)
-├── .gitignore                          ← excludes JLink tarball, __pycache__
-├── bin/
-│   ├── manage_debug                    ← thin wrapper
-│   └── manage_debug.py                 ← USB arbitration manager (Python)
-├── openocd/
-│   ├── board-a.cfg                     ← J-Link SN 000770593783, SWD 1MHz
-│   ├── board-b.cfg                     ← J-Link SN 000775604909, SWD 1MHz
-│   └── jlink-swd-stm32g4.cfg           ← shared SWD config (no serial)
-├── scripts/
-│   ├── read_sensor.py                  ← read RGBSensorData from RAM
-│   ├── collect_calibration.py          ← RGB sweep + distance sweep
-│   ├── calibrate_fit.py                ← fit M matrix, validate distances
-│   └── joint_visualizer.py             ← WebSocket + HTTP server for viz
-├── viz/
-│   └── index.html                      ← Three.js browser visualization
-├── tests/
-│   └── test_manage_debug.py            ← unit tests (34 tests, no hardware)
-└── emb-fwtk-redesign-spec.md           ← formal spec
-```
-
-## Port Assignment
-
-Ports are **auto-assigned** by probe index in `probes.yaml`:
-
-| Probe Index | Telnet  | GDB     | Remote  |
-|-------------|---------|---------|---------|
-| 0 (board-a) | 4444    | 3333    | 19020   |
-| 1 (board-b) | 4445    | 3334    | 19021   |
-| 2 (board-c) | 4446    | 3335    | 19022   |
-| ...         | 4444+N  | 3333+N  | 19020+N |
-
-Override any port in `probes.yaml`:
-
-```yaml
-probes:
-  board-a:
-    serial: "..."
-    ports:
-      telnet: 4444    # explicit
-      # gdb and remote still auto-assigned
-```
-
-### Port offset for multi-container setups
-
-If running multiple containers under `--network host`, set `port_offset`:
-
-```yaml
-# Container 2
-port_offset: 10
-probes:
-  board-c:  # gets telnet=4454, gdb=3343, remote=19030
-    ...
-```
-
-## manage_debug Reference
-
-| Command | Description | Locks? |
-|---------|-------------|--------|
-| `list [--json]` | Show detected probes, ports, USB state | No |
-| `status [--json]` | Show active session, running services, lock | No |
-| `mode ocd [--force]` | Start OpenOCD on all probes | Yes |
-| `mode remote [--force]` | Start J-Link Remote Server | Yes |
-| `flash <target> <elf> [--force]` | Flash firmware (transient, no session restore) | Yes |
-| `stop [--force]` | Stop all debug services, release lock | Yes |
-| `rescan [--json]` | Re-probe USB for new device nodes | No |
-
-Exit codes: 0 = ok, 1 = error, 2 = busy (lock held).
-
-## USB Rescan
-
-If a J-Link is unplugged and re-plugged, the container's USB device node may be stale:
-
-```bash
-docker exec emb-fwtk manage_debug rescan
-```
-
-This re-probes USB. If the probe is detected but the device node is stale, run:
-
-```bash
-docker restart emb-fwtk
+├── Dockerfile               ARM64 Debian 13 + OpenOCD + ARM GCC + J-Link
+├── bin/manage_debug[.py]    session manager (std lib + PyYAML only)
+├── probes.example.yaml      probe inventory template
+├── openocd/probe.example.cfg  per-probe OpenOCD config template
+├── docs/                    wiki: topologies, known quirks, design spec
+├── examples/sca/            first user: RGB-sensing boards, scripts, .jdebug
+└── tests/                   unit tests (no hardware needed)
 ```
 
 ## Testing
 
 ```bash
-# Unit tests (no hardware needed)
-cd emb_fwtk
-PYTHONPATH=bin python3 -m pytest tests/ -v
+PYTHONPATH=bin python3 -m pytest tests/ -v     # 34 tests, hardware-free
 ```
 
-## Project History
+## Requirements
 
-This is a redesign of the original two-container setup (separate `ocd-a` and `ocd-b` containers) that suffered from `LIBUSB_ERROR_BUSY` and `tcl_port` collisions. The unified container with `manage_debug` arbitration resolves both.
+- ARM64 Linux host (Docker), `--privileged` + `/dev/bus/usb` passthrough
+- J-Link-compatible probes (ST-Link clones flashed with J-Link firmware work)
+- SEGGER J-Link Software Pack — you download it; it is never committed
+  (gitignored) and never redistributed here
 
 ## License
 
-The SEGGER J-Link software is subject to SEGGER's license terms. The J-Link tarball is excluded from this repository — download it directly from SEGGER.
+MIT — see [LICENSE](LICENSE). SEGGER's own license governs their software;
+this repo ships none of it.

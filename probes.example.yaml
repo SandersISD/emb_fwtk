@@ -1,0 +1,32 @@
+# emb_fwtk probe configuration — TEMPLATE
+# Copy to probes.yaml and edit for your hardware. probes.yaml is gitignored;
+# manage_debug reads it at runtime (bind-mount or bake it in).
+#
+# Fields per probe:
+#   serial          J-Link probe serial number (required) — find with
+#                   `manage_debug list` or lsusb; ST-Link clones flashed as
+#                   J-Link report theirs via JLinkExe -USB <n>
+#   role            free text, human reference only (optional)
+#   openocd_config  path to this probe's OpenOCD config, relative to this
+#                   file (optional — defaults to openocd/<name>.cfg)
+#   ports           optional per-probe overrides; omit for auto-assignment:
+#                     telnet 4444 + i          (OpenOCD telnet, per probe)
+#                     gdb    3333 + i          (OpenOCD gdb, per probe)
+#                     remote 19020 + 2*i       (JLinkRemoteServer — stride 2,
+#                                              server also binds port+1)
+#
+# Top-level:
+#   port_offset     shift ALL auto-assigned ports by this (multi-container
+#                   --network host setups)
+
+port_offset: 0
+
+probes:
+  my-board:
+    serial: "000000000000"
+    role: "describe what this board does"
+    openocd_config: "openocd/my-board.cfg"
+    # ports:
+    #   telnet: 4444
+    #   gdb: 3333
+    #   remote: 19020

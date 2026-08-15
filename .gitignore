@@ -12,3 +12,6 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# user probe inventory (contains serials) — commit the example instead
+probes.yaml

@@ -2,6 +2,11 @@
 
 Dockerized development environment for STM32G4 firmware, with **two debug modes** (OpenOCD for Python scripting, J-Link Remote Server for Ozone GUI debugging) and a **USB arbitration manager** that cleanly switches between them.
 
+**Docs:** see [docs/](docs/index.md) — the wiki, including [Debug Topologies](docs/debug-topologies.md) (three ways to arrange host/slave/target) and [Known Quirks](docs/known-quirks.md) (hardware-verified gotchas).
+
+> emb_fwtk is project-agnostic. SCA (RGB sensing) is its first user; the
+> toolkit itself is reusable for any J-Link/SWD debug setup.
+
 ## Quick Start
 
 ### 1. Prerequisites

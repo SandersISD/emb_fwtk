@@ -105,7 +105,8 @@ class TestPortAssignment(unittest.TestCase):
         self.assertEqual(assigned["board-a"]["remote"], 19020)
         self.assertEqual(assigned["board-b"]["telnet"], 4445)
         self.assertEqual(assigned["board-b"]["gdb"], 3334)
-        self.assertEqual(assigned["board-b"]["remote"], 19021)
+        # remote ports stride 2 (JLinkRemoteServer binds port AND port+1)
+        self.assertEqual(assigned["board-b"]["remote"], 19022)
 
     def test_port_offset_shifts_all(self):
         cfg = {
@@ -118,6 +119,9 @@ class TestPortAssignment(unittest.TestCase):
         assigned = md.auto_assign_ports(cfg)
         self.assertEqual(assigned["board-a"]["telnet"], 4454)
         self.assertEqual(assigned["board-b"]["telnet"], 4455)
+        # remote ports stride 2 (JLinkRemoteServer binds port AND port+1)
+        self.assertEqual(assigned["board-a"]["remote"], 19030)
+        self.assertEqual(assigned["board-b"]["remote"], 19032)
 
     def test_override_beats_auto(self):
         cfg = {
@@ -147,7 +151,7 @@ class TestPortAssignment(unittest.TestCase):
         assigned = md.auto_assign_ports(cfg)
         self.assertEqual(assigned["c"]["telnet"], 4446)
         self.assertEqual(assigned["c"]["gdb"], 3335)
-        self.assertEqual(assigned["c"]["remote"], 19022)
+        self.assertEqual(assigned["c"]["remote"], 19024)
 
 
 class TestPortCollision(unittest.TestCase):

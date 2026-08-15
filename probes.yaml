@@ -22,7 +22,9 @@ probes:
     serial: "000775604909"
     role: "receiver"
     openocd_config: "openocd/board-b.cfg"
-    # ports:
-    #   telnet: 4445
-    #   gdb: 3334
-    #   remote: 19021
+    # NOTE: JLinkRemoteServer binds BOTH <port> and <port>+1 (loopback).
+    # Consecutive remote ports collide — board-a's server would grab 19021.
+    ports:
+      telnet: 4445
+      gdb: 3334
+      remote: 19022

@@ -162,7 +162,10 @@ def auto_assign_ports(cfg: dict) -> dict:
         pcfg = probe.get("ports", {})
         telnet = pcfg.get("telnet", BASE_TELNET + i + offset)
         gdb = pcfg.get("gdb", BASE_GDB + i + offset)
-        remote = pcfg.get("remote", BASE_REMOTE + i + offset)
+        # JLinkRemoteServer binds BOTH <port> and <port>+1 (loopback helper),
+        # so auto-assigned remote ports MUST be spaced 2 apart to avoid the
+        # next probe's port colliding with this probe's port+1 binding.
+        remote = pcfg.get("remote", BASE_REMOTE + 2 * i + offset)
         assigned[name] = {
             "serial": probe["serial"],
             "role": probe.get("role", "unspecified"),
@@ -690,21 +693,22 @@ def cmd_mode_remote(args: argparse.Namespace, cfg: dict, pm: ProcessManager) -> 
             serial=info["serial"],
             port=info["remote"],
         )
-        results[name] = "ok" if ok else "failed"
+        results[name] = {"status": "ok" if ok else "failed", "remote_port": info["remote"]}
 
     result = {
         "_text": "=== Ozone Session ===\n",
         "mode": "remote",
-        "results": results,
+        "results": {n: r["status"] for n, r in results.items()},
+        "ports": {n: r["remote_port"] for n, r in results.items()},
         "warnings": warnings,
     }
 
     result["_text"] += f"\nResults:\n"
-    for name, status in results.items():
-        result["_text"] += f"  {name}: {status}\n"
-        if status == "ok":
+    for name, r in results.items():
+        result["_text"] += f"  {name}: {r['status']}  (port {r['remote_port']})\n"
+        if r["status"] == "ok":
             result["_text"] += (
-                f"    Connect Ozone to: <pi-ip>:{info['remote']}\n"
+                f"    Connect Ozone to: <pi-ip>:{r['remote_port']}\n"
             )
     for w in warnings:
         result["_text"] += f"\n{w}\n"
